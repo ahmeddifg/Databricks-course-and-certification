@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 📝 03-Q · Exam Questions — Delta Lake
-# MAGIC **30 exam-style questions** on the transaction log (03-P1), working with Delta tables (03-P2) and time travel, clones &
+# MAGIC **36 exam-style questions** on the transaction log (03-P1), working with Delta tables (03-P2) and time travel, clones &
 # MAGIC maintenance (03-P3). Target **≥ 80 %** before Section 04.
 
 # COMMAND ----------
@@ -168,12 +168,12 @@ questions = [
      "options": ["It creates an index file", "It co-locates rows with similar customer_id values in the same files so filters on customer_id skip more files",
                  "It partitions the table by customer_id into folders", "It deletes duplicate customer_ids"],
      "answer": 1,
-     "explanation": "Z-ordering sorts data along the given columns during compaction, improving data skipping via file min/max stats. It isn't incremental and doesn't create directories."},
+     "explanation": "Z-ordering sorts data along the given columns during compaction, improving data skipping via file min/max stats. Unlike plain OPTIMIZE it isn't idempotent (re-running can rewrite data again), and it doesn't create directories — that would be partitioning."},
     {"topic": "Time travel & maintenance",
-     "q": "The team needs a **full, independent backup** of a production table that stays valid even if the source is vacuumed. Which command?",
+     "q": "The team needs a **full, independent backup** of a production table — a copy with its own data files that doesn't depend on the source table at all. Which command?",
      "options": ["`CREATE TABLE b SHALLOW CLONE prod`", "`CREATE TABLE b DEEP CLONE prod`", "`CREATE VIEW b AS SELECT * FROM prod`", "`CREATE TABLE b LIKE prod`"],
      "answer": 1,
-     "explanation": "A deep clone copies data and metadata. A shallow clone only references the source's files and breaks if they're vacuumed; a view stores no data."},
+     "explanation": "A deep clone copies data and metadata, so it's fully independent. A shallow clone only references the source's files (in the legacy Hive metastore it even breaks when the source is vacuumed; Unity Catalog protects referenced files); a view stores no data."},
     {"topic": "Time travel & maintenance",
      "q": "Which statement about a **shallow clone** is correct?",
      "options": ["Updates on the clone also change the source table", "It copies only metadata and references the source's data files, so it's created almost instantly",
@@ -185,10 +185,48 @@ questions = [
      "options": ["`RESTORE TABLE t TO VERSION AS OF 0`", "`UNDROP TABLE t`", "It's impossible — managed table data is deleted immediately", "`CREATE TABLE t DEEP CLONE t`"],
      "answer": 1,
      "explanation": "UNDROP recovers dropped Unity Catalog tables within the retention window (7 days by default). SHOW TABLES DROPPED lists them."},
+    {"topic": "Working with tables",
+     "q": "A daily job must **re-process only 2026-09-25** in a large Delta table, replacing that day's rows atomically without touching other days. Which approach fits?",
+     "options": ["`INSERT OVERWRITE sales SELECT … WHERE order_date = '2026-09-25'`",
+                 "`INSERT INTO sales REPLACE WHERE order_date = '2026-09-25' SELECT …` (or `replaceWhere` in Python)",
+                 "`DELETE FROM sales` followed by `INSERT INTO sales`", "`CREATE OR REPLACE TABLE sales AS SELECT …`"],
+     "answer": 1,
+     "explanation": "REPLACE WHERE / replaceWhere atomically replaces only rows matching the predicate. A plain INSERT OVERWRITE would replace the whole (non-partitioned) table; two separate statements aren't atomic."},
+    {"topic": "Time travel & maintenance",
+     "q": "Which PySpark code reads version 7 of the table `sales.orders`?",
+     "options": ["`spark.table(\"sales.orders\").version(7)`", "`spark.read.option(\"versionAsOf\", 7).table(\"sales.orders\")`",
+                 "`spark.read.table(\"sales.orders@7\")`", "`spark.read.format(\"history\").load(\"sales.orders\", 7)`"],
+     "answer": 1,
+     "explanation": "The DataFrame reader options versionAsOf / timestampAsOf do time travel in Python. In SQL: VERSION AS OF 7 or sales.orders@v7."},
+    {"topic": "Time travel & maintenance",
+     "q": "Nobody on the team schedules OPTIMIZE or VACUUM, yet the Unity Catalog **managed** tables stay compacted and old files get cleaned up. What explains this?",
+     "options": ["Delta tables never need maintenance", "Predictive optimization runs OPTIMIZE and VACUUM automatically for UC managed tables",
+                 "The SQL warehouse vacuums tables when it stops", "Auto Loader compacts the tables"],
+     "answer": 1,
+     "explanation": "Predictive optimization analyses usage and triggers maintenance (OPTIMIZE, VACUUM, ANALYZE) for Unity Catalog managed tables — one reason to prefer managed tables."},
+    {"topic": "Working with tables",
+     "q": "`orders` must always store `order_date` derived from `order_ts`, without the loading jobs computing it. What do you use?",
+     "code": "CREATE TABLE orders (\n  order_id   STRING,\n  order_ts   TIMESTAMP,\n  order_date DATE ???\n)",
+     "options": ["`DEFAULT current_date()`", "`GENERATED ALWAYS AS (CAST(order_ts AS DATE))`",
+                 "`GENERATED ALWAYS AS IDENTITY`", "`CHECK (order_date = CAST(order_ts AS DATE))`"],
+     "answer": 1,
+     "explanation": "A generated column is computed by Delta on every write from its expression. IDENTITY generates surrogate keys; a CHECK would only validate a value the job still has to supply. Generated columns must be declared at CREATE TABLE (not via CTAS)."},
+    {"topic": "Time travel & maintenance",
+     "q": "Rows disappeared from `sales.orders` last night. How do you find **who** ran the change and **which operation** it was?",
+     "options": ["`DESCRIBE DETAIL sales.orders`", "`DESCRIBE HISTORY sales.orders` — columns userName, operation, operationParameters",
+                 "`SHOW GRANTS ON sales.orders`", "`SHOW TBLPROPERTIES sales.orders`"],
+     "answer": 1,
+     "explanation": "The history (from the transaction log) records version, timestamp, userName, operation (e.g. DELETE), its parameters (the predicate) and metrics for every commit."},
+    {"topic": "Working with tables",
+     "q": "Which statement creates an **external** Delta table from a query?",
+     "options": ["`CREATE TABLE t AS SELECT * FROM src`", "`CREATE TABLE t LOCATION 's3://bucket/tables/t' AS SELECT * FROM src`",
+                 "`CREATE TABLE t PARTITIONED BY (d) AS SELECT * FROM src`", "`CREATE EXTERNAL VIEW t AS SELECT * FROM src`"],
+     "answer": 1,
+     "explanation": "Specifying LOCATION makes the table external: its files live at your path and aren't deleted when the table is dropped. Without LOCATION the table is managed. (Managed vs external in depth → Section 04.)"},
 ]
 
-render_quiz(questions, title="Section 03 · Delta Lake",
-            meta="30 questions · transaction log, writes & MERGE, time travel, clones, OPTIMIZE & VACUUM · target ≥ 80 %")
+render_quiz(questions, title="Section 03 · Delta Lake", pass_mark=0.8,
+            meta="36 questions · transaction log, writes & MERGE, time travel, clones, OPTIMIZE & VACUUM · target ≥ 80 %")
 
 # COMMAND ----------
 

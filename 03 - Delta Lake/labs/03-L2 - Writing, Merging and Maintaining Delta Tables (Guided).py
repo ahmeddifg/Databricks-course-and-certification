@@ -71,7 +71,39 @@ print("Temporary views ready")
 # MAGIC |---|---|---|
 # MAGIC | Schema | Declared by you | Inferred from the query |
 # MAGIC | Data | Empty — load with `INSERT` | Filled immediately |
-# MAGIC | Constraints / generated columns | ✅ declared up front | Add afterwards with `ALTER TABLE` |
+# MAGIC | `CHECK` constraints | added with `ALTER TABLE … ADD CONSTRAINT` | same — added afterwards |
+# MAGIC | Generated / identity columns | ✅ declared up front | ❌ not possible with CTAS (create the table first, then `INSERT … SELECT`) |
+# MAGIC | `COMMENT`, `TBLPROPERTIES`, `PARTITIONED BY`, `CLUSTER BY` | ✅ | ✅ (next cell) |
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC CTAS accepts the same **table clauses** as `CREATE TABLE`. Here we partition a copy of the orders by month and look at the
+# MAGIC result with `DESCRIBE DETAIL` (`partitionColumns`, `location`):
+
+# COMMAND ----------
+
+# DBTITLE 1,CTAS with PARTITIONED BY
+# MAGIC %sql
+# MAGIC CREATE OR REPLACE TABLE lab03_orders_by_month
+# MAGIC COMMENT 'Orders partitioned by month (demo)'
+# MAGIC PARTITIONED BY (order_month)
+# MAGIC AS SELECT *, date_format(order_ts, 'yyyy-MM') AS order_month FROM lab03_orders;
+
+# COMMAND ----------
+
+# DBTITLE 1,Where is it stored, and how is it partitioned?
+_d = table_detail("lab03_orders_by_month")
+print("location        :", _d["location"])
+print("partitionColumns:", _d["partitionColumns"])
+print("numFiles        :", _d["numFiles"])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC > 🎯 Managed tables live in **managed storage** chosen by Unity Catalog. Adding `LOCATION '<path>'` to a `CREATE TABLE`/CTAS
+# MAGIC > makes an **external** table instead (it needs an *external location*, which Free Edition doesn't offer) → Section 04.
+# MAGIC > Partitioning is shown for the exam; for new tables Databricks recommends **liquid clustering** (`CLUSTER BY`) → Section 12.
 
 # COMMAND ----------
 
@@ -157,6 +189,10 @@ print("👉 To change the schema, use CREATE OR REPLACE TABLE (or overwrite with
 v_first_insert = (spark.sql("DESCRIBE HISTORY lab03_orders")
                        .where("operation = 'WRITE' AND operationParameters['mode'] = 'Append'")
                        .agg({"version": "min"}).first()[0])
+if v_first_insert is None:   # fallback: first version holding the history + one copy of batch 01
+    _versions = sorted(r["version"] for r in spark.sql("DESCRIBE HISTORY lab03_orders").collect())
+    v_first_insert = next(v for v in _versions
+                          if spark.read.option("versionAsOf", v).table("lab03_orders").count() == 2010 + 121)
 spark.sql(f"RESTORE TABLE lab03_orders TO VERSION AS OF {v_first_insert}")
 print(f"Restored to version {v_first_insert} →", spark.table("lab03_orders").count(), "orders")
 
@@ -174,7 +210,8 @@ print(f"Restored to version {v_first_insert} →", spark.table("lab03_orders").c
 
 # MAGIC %md
 # MAGIC The result shows `num_inserted_rows = 0`: every order of batch 01 is already there, so nothing is duplicated. Run the cell again — still 0.
-# MAGIC *(Batch 01 contains one exact duplicate row, which `distinct_order_ids` below reveals — cleaning duplicates **inside** a source batch is covered in Section 07.)*
+# MAGIC *(`orders` and `distinct_order_ids` differ by 11: the historical Parquet data already contains 10 exact duplicate rows and batch 01 one more —
+# MAGIC cleaning duplicates **inside** source data is covered in Section 07.)*
 
 # COMMAND ----------
 
@@ -235,7 +272,7 @@ print(f"Restored to version {v_first_insert} →", spark.table("lab03_orders").c
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Expected: **40 updated, 20 inserted**. The condition `s.updated > t.updated` makes the MERGE **idempotent** — run it
+# MAGIC Expected: **40 updated, 20 inserted** (see `num_updated_rows` / `num_inserted_rows` in the result). The condition `s.updated > t.updated` makes the MERGE **idempotent** — run it
 # MAGIC again and nothing changes because the target is already up to date:
 
 # COMMAND ----------
@@ -266,7 +303,7 @@ display(history("lab03_customers").where("operation = 'MERGE'")
 # MAGIC ### MERGE clause cheat sheet
 # MAGIC ```sql
 # MAGIC MERGE INTO target t USING source s ON t.key = s.key
-# MAGIC WHEN MATCHED AND <cond> THEN UPDATE SET t.col = s.col, ...   -- or UPDATE SET *
+# MAGIC WHEN MATCHED AND <cond> THEN UPDATE SET col = s.col, ...     -- or UPDATE SET *
 # MAGIC WHEN MATCHED AND s.op = 'DELETE' THEN DELETE
 # MAGIC WHEN NOT MATCHED [BY TARGET] THEN INSERT *                   -- or INSERT (cols) VALUES (...)
 # MAGIC WHEN NOT MATCHED BY SOURCE THEN DELETE                        -- rows in target missing from source
@@ -321,6 +358,7 @@ try:
     print("Merged (unexpected!)")
 except Exception as e:
     print("🚫", str(e).strip().splitlines()[0][:230])
+print("   (a failed MERGE commits nothing - the table is unchanged)")
 print("👉 Fix: deduplicate the source first (e.g. keep the latest row per key with row_number()).")
 
 # COMMAND ----------
@@ -332,8 +370,8 @@ print("👉 Fix: deduplicate the source first (e.g. keep the latest row per key 
 # MAGIC |---|---|---|
 # MAGIC | Copies | data files **and** metadata | metadata / transaction log only — **points to the source's files** |
 # MAGIC | Speed & cost | slower, more storage | instant, almost free |
-# MAGIC | Independent of source files? | ✅ yes | ❌ breaks if the source's files are vacuumed |
-# MAGIC | Re-running it | incrementally syncs new changes | re-creates the pointer |
+# MAGIC | Independent of the source? | ✅ fully | shares the source's files — in **Unity Catalog** a `VACUUM` of the source doesn't break it (UC tracks the files clones still use); in the legacy Hive metastore it **does** break |
+# MAGIC | Re-running it | `CREATE OR REPLACE … DEEP CLONE` incrementally syncs new changes | in UC you **can't** `CREATE OR REPLACE` a shallow clone — drop it and clone again |
 # MAGIC | Typical use | backups, migrating tables | dev/test copies, experiments |
 # MAGIC
 # MAGIC In both cases **changes to the clone don't affect the source** (and vice versa).
@@ -343,7 +381,9 @@ print("👉 Fix: deduplicate the source first (e.g. keep the latest row per key 
 # DBTITLE 1,Create a backup (deep) and a dev copy (shallow)
 # MAGIC %sql
 # MAGIC CREATE OR REPLACE TABLE lab03_catalog_backup DEEP CLONE lab03_catalog;
-# MAGIC CREATE OR REPLACE TABLE lab03_catalog_dev SHALLOW CLONE lab03_catalog;
+# MAGIC
+# MAGIC DROP TABLE IF EXISTS lab03_catalog_dev;              -- UC: shallow clones can't be CREATE OR REPLACEd
+# MAGIC CREATE TABLE lab03_catalog_dev SHALLOW CLONE lab03_catalog;
 
 # COMMAND ----------
 
@@ -408,11 +448,13 @@ print("OPTIMIZE metrics:", {k: v for k, v in last_operation_metrics("lab03_event
 # MAGIC * **`OPTIMIZE`** = **bin-packing**: rewrites many small files into fewer large ones (target ≈ 1 GB). It's a new version in the history; the old
 # MAGIC   small files are only *logically* removed.
 # MAGIC * **`ZORDER BY (col)`** = also **co-locates** similar values of `col` in the same files, so filters on `col` skip more files
-# MAGIC   (data skipping). It is **not incremental** (re-sorts all data each time). New tables should prefer **liquid clustering** (Section 12).
+# MAGIC   (data skipping). Unlike plain `OPTIMIZE`, Z-ordering is **not idempotent** — running it again can rewrite large parts of the
+# MAGIC   data. New tables should prefer **liquid clustering**, which clusters **incrementally** (Section 12).
 # MAGIC
 # MAGIC ### `VACUUM` — physically deleting old files
 # MAGIC Old files stay in storage so **time travel** keeps working. `VACUUM` deletes files that are **no longer referenced** by the
-# MAGIC current version **and** are older than the retention period (default **7 days**).
+# MAGIC current version **and** were removed longer ago than the retention period (default **7 days**). The clock starts when a
+# MAGIC file is *logically removed* by a commit (e.g. by `OPTIMIZE`), not when it was written.
 
 # COMMAND ----------
 
@@ -423,7 +465,7 @@ print("OPTIMIZE metrics:", {k: v for k, v in last_operation_metrics("lab03_event
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Nothing (or almost nothing): the files replaced by `OPTIMIZE` are younger than 7 days, so they're protected.
+# MAGIC Nothing (or almost nothing): the files replaced by `OPTIMIZE` were removed only minutes ago — less than 7 days — so they're protected.
 
 # COMMAND ----------
 
@@ -461,7 +503,8 @@ try:
     spark.sql("UNDROP TABLE lab03_catalog_backup")
     print("♻️ UNDROP worked - exists again?", spark.catalog.tableExists("lab03_catalog_backup"))
 except Exception as e:
-    print("ℹ️ UNDROP not available here:", str(e).strip().splitlines()[0][:200])
+    print("ℹ️ UNDROP by name didn't work here:", str(e).strip().splitlines()[0][:200])
+    print("   (if several dropped tables share the name, use UNDROP TABLE WITH ID '<id from SHOW TABLES DROPPED>')")
     spark.sql("CREATE OR REPLACE TABLE lab03_catalog_backup DEEP CLONE lab03_catalog")   # recreate for the checks
 
 # COMMAND ----------
@@ -472,19 +515,24 @@ except Exception as e:
 # COMMAND ----------
 
 # DBTITLE 1,Check your work
-_merge = last_operation_metrics("lab03_customers", "MERGE")
 _merges = (spark.sql("DESCRIBE HISTORY lab03_customers").where("operation = 'MERGE'")
                 .orderBy("version").collect())
 _first_merge = dict(_merges[0]["operationMetrics"]) if _merges else {}
+# A MERGE that changes nothing may or may not be recorded as a commit - both prove idempotency
+_second_merge = dict(_merges[1]["operationMetrics"]) if len(_merges) > 1 else {"numTargetRowsUpdated": "0",
+                                                                                "numTargetRowsInserted": "0"}
 _checks = {
-    "lab03_orders has no duplicate order loads": spark.sql(
+    "lab03_orders holds batch 01 exactly once (2,131 rows)": spark.table("lab03_orders").count() == 2010 + 121,
+    "lab03_orders has 2,120 distinct orders": spark.sql(
         "SELECT count(DISTINCT order_id) FROM lab03_orders").first()[0] == 2000 + 120,
+    "lab03_orders_by_month is partitioned by order_month": list(
+        table_detail("lab03_orders_by_month")["partitionColumns"]) == ["order_month"],
     "RESTORE is in lab03_orders history": {"RESTORE"} <= {
         r["operation"] for r in spark.sql("DESCRIBE HISTORY lab03_orders").collect()},
     "First MERGE updated 40 customers": _first_merge.get("numTargetRowsUpdated") == "40",
     "First MERGE inserted 20 customers": _first_merge.get("numTargetRowsInserted") == "20",
-    "Second MERGE changed nothing (idempotent)": _merge.get("numTargetRowsUpdated") == "0"
-                                                 and _merge.get("numTargetRowsInserted") == "0",
+    "Second MERGE changed nothing (idempotent)": _second_merge.get("numTargetRowsUpdated") == "0"
+                                                 and _second_merge.get("numTargetRowsInserted") == "0",
     "lab03_customers now has 320 customers": spark.table("lab03_customers").count() == 320,
     "lab03_catalog has 39 products": spark.table("lab03_catalog").count() == 39,
     "Shallow clone change didn't touch the source": spark.sql(

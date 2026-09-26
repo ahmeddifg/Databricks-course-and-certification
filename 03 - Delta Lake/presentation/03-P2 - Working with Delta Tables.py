@@ -38,6 +38,14 @@
 # MAGIC COMMENT 'Orders above 500' AS
 # MAGIC SELECT * FROM sales.orders WHERE total > 500;
 # MAGIC
+# MAGIC -- 2b) Table clauses work with CTAS too
+# MAGIC CREATE TABLE sales.orders_by_month
+# MAGIC COMMENT 'Partitioned copy'
+# MAGIC PARTITIONED BY (order_month)            -- or CLUSTER BY (col) for liquid clustering
+# MAGIC TBLPROPERTIES ('owner_team' = 'sales')
+# MAGIC -- LOCATION 's3://bucket/path'          -- ⇒ EXTERNAL table (needs an external location) → Section 04
+# MAGIC AS SELECT *, date_format(order_ts, 'yyyy-MM') AS order_month FROM sales.orders;
+# MAGIC
 # MAGIC -- 3) Replace an existing table atomically (keeps the history!)
 # MAGIC CREATE OR REPLACE TABLE sales.big_orders AS SELECT ...;
 # MAGIC
@@ -49,6 +57,8 @@
 # MAGIC |---|---|---|
 # MAGIC | Schema | declared | inferred from `SELECT` (cast to control types) |
 # MAGIC | Data | empty | loaded |
+# MAGIC | Generated / identity columns | ✅ | ❌ (create the table first, then `INSERT … SELECT`) |
+# MAGIC | Table clauses (`COMMENT`, `TBLPROPERTIES`, `PARTITIONED BY`, `CLUSTER BY`, `LOCATION`) | ✅ | ✅ |
 # MAGIC | Typical use | contracts, constraints, generated columns | quick materialisation of a query |
 # MAGIC
 # MAGIC > ⚠️ **Exam trap:** `DROP TABLE` + `CREATE TABLE` **loses the history** (new table). `CREATE OR REPLACE TABLE` keeps it — you can still time-travel to versions before the replace.
@@ -96,6 +106,24 @@ show("""
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Overwriting only part of a table
+# MAGIC ```sql
+# MAGIC -- Replace only the rows that match a predicate (atomic delete + insert)
+# MAGIC -- (sales.daily_orders: order_id, order_date, total — no identity/generated columns)
+# MAGIC INSERT INTO sales.daily_orders REPLACE WHERE order_date >= '2026-09-01'
+# MAGIC SELECT order_id, order_date, total FROM staging_orders WHERE order_date >= '2026-09-01';
+# MAGIC ```
+# MAGIC ```python
+# MAGIC (df.select("order_id", "order_date", "total")
+# MAGIC    .write.mode("overwrite")
+# MAGIC    .option("replaceWhere", "order_date >= '2026-09-01'")   # same idea in Python
+# MAGIC    .saveAsTable("sales.daily_orders"))
+# MAGIC ```
+# MAGIC Useful to **re-process one day or month idempotently** without touching the rest of the table.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 4 · UPDATE, DELETE and MERGE
 # MAGIC
 # MAGIC ```sql
@@ -106,19 +134,20 @@ show("""
 # MAGIC MERGE INTO sales.customers AS t                                   -- target
 # MAGIC USING customer_updates    AS s                                    -- source (table, view or subquery)
 # MAGIC ON t.customer_id = s.customer_id                                  -- match condition (keys)
-# MAGIC WHEN MATCHED AND s.op = 'DELETE'      THEN DELETE
-# MAGIC WHEN MATCHED AND s.updated > t.updated THEN UPDATE SET *          -- or SET col = s.col, ...
-# MAGIC WHEN NOT MATCHED                        THEN INSERT *             -- = NOT MATCHED BY TARGET
-# MAGIC WHEN NOT MATCHED BY SOURCE              THEN UPDATE SET active = false;
+# MAGIC WHEN MATCHED AND s.op = 'DELETE'       THEN DELETE
+# MAGIC WHEN MATCHED AND s.updated > t.updated THEN UPDATE SET email = s.email, updated = s.updated
+# MAGIC WHEN NOT MATCHED                       THEN INSERT (customer_id, email, updated)      -- = NOT MATCHED BY TARGET
+# MAGIC                                             VALUES (s.customer_id, s.email, s.updated)
+# MAGIC WHEN NOT MATCHED BY SOURCE             THEN UPDATE SET active = false;  -- target rows absent from the source
 # MAGIC ```
 # MAGIC
 # MAGIC | MERGE fact | Detail |
 # MAGIC |---|---|
 # MAGIC | Clause order | Multiple `WHEN MATCHED` / `WHEN NOT MATCHED` clauses are evaluated in order; each needs a condition except the last one |
-# MAGIC | `UPDATE SET *` / `INSERT *` | Map columns **by name** — source must have the target's columns |
+# MAGIC | `UPDATE SET *` / `INSERT *` | Shorthand for "all **target** columns = source columns with the same name". The source must contain every target column; extra source columns are ignored (unless schema evolution is on) |
 # MAGIC | Duplicate source keys | If several source rows match the same target row in an UPDATE/DELETE clause → **error**. Deduplicate the source first |
 # MAGIC | Insert-only MERGE | `WHEN NOT MATCHED THEN INSERT *` only → a safe, idempotent way to append without duplicates |
-# MAGIC | Metrics | `DESCRIBE HISTORY` → `numTargetRowsUpdated`, `numTargetRowsInserted`, `numTargetRowsDeleted` |
+# MAGIC | Metrics | The statement returns `num_affected_rows`, `num_updated_rows`, `num_deleted_rows`, `num_inserted_rows`; `DESCRIBE HISTORY` → `numTargetRowsUpdated`, `numTargetRowsInserted`, `numTargetRowsDeleted` |
 
 # COMMAND ----------
 

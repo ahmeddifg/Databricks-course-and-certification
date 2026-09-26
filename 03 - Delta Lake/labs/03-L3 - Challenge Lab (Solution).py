@@ -276,11 +276,12 @@ check("P039 has warehouse RUH-1", "warehouse" in _cols and spark.sql(
 
 # MAGIC %md
 # MAGIC ## Task 8 · VACUUM & time travel
-# MAGIC Last week someone ran `VACUUM lab03_inventory RETAIN 0 HOURS` (with the safety check disabled). Today you try
-# MAGIC `SELECT * FROM lab03_inventory VERSION AS OF 2`. What happens?
+# MAGIC Last week someone ran `VACUUM big_table RETAIN 0 HOURS` (with the safety check disabled) on a table that is
+# MAGIC updated every day. Today you try `SELECT * FROM big_table VERSION AS OF 2` — a version whose data files are no longer
+# MAGIC used by the current version. What happens?
 # MAGIC
 # MAGIC * **A** — It works: time travel only needs the transaction log
-# MAGIC * **B** — It fails (or returns incomplete data) because the data files of old versions were physically deleted
+# MAGIC * **B** — It fails because the data files that version 2 needs were physically deleted
 # MAGIC * **C** — VACUUM also deleted the transaction log, so the table is gone
 # MAGIC * **D** — It returns the current version instead
 
@@ -288,8 +289,9 @@ check("P039 has warehouse RUH-1", "warehouse" in _cols and spark.sql(
 
 # DBTITLE 1,Task 8 · SOLUTION
 answer_task8 = "B"
-# VACUUM deletes data files not needed by the CURRENT version (older than the retention period).
-# The log still lists old versions, but their files are gone -> time travel to them fails.
+# VACUUM deletes data files that the current version no longer references and that were removed longer ago
+# than the retention period. The log still lists old versions, but their files are gone -> time travel fails.
+# (Files still used by the current version are never vacuumed.)
 
 # COMMAND ----------
 

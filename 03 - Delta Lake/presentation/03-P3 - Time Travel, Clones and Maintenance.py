@@ -34,8 +34,9 @@ show("""
   <div class="step"><b>v1</b>WRITE (load 36 rows)</div><div class="arrow">➜</div>
   <div class="step"><b>v2</b>UPDATE prices</div><div class="arrow">➜</div>
   <div class="step"><b>v3</b>DELETE Toys</div><div class="arrow">➜</div>
-  <div class="step" style="background:#ffe8e8"><b>v4</b>💥 DELETE all</div><div class="arrow">➜</div>
-  <div class="step" style="background:#e6f7ea"><b>v5</b>RESTORE to v3</div>
+  <div class="step"><b>v4</b>WRITE (2 new)</div><div class="arrow">➜</div>
+  <div class="step" style="background:#ffe8e8"><b>v5</b>💥 DELETE all</div><div class="arrow">➜</div>
+  <div class="step" style="background:#e6f7ea"><b>v6</b>RESTORE to v4</div>
 </div>
 <table class="tbl">
 <tr><th>Goal</th><th>SQL</th><th>Python</th></tr>
@@ -44,7 +45,7 @@ show("""
 <tr><td>Roll back</td><td><code>RESTORE TABLE t TO VERSION AS OF 3</code> · <code>… TO TIMESTAMP AS OF '…'</code></td><td>—</td></tr>
 <tr><td>Audit</td><td><code>DESCRIBE HISTORY t</code></td><td><code>spark.sql("DESCRIBE HISTORY t")</code></td></tr>
 </table>
-""" + callout("exam", "<code>RESTORE</code> is itself a <b>new commit</b> (v5 above). History is never rewritten — you can still query v4.")
+""" + callout("exam", "<code>RESTORE</code> is itself a <b>new commit</b> (v6 above — exactly what you do in lab 03-L1). History is never rewritten — you can still query v5.")
     + callout("trap", "Time travel needs the <b>old data files</b>. After <code>VACUUM</code> removes them, querying those versions fails."))
 
 # COMMAND ----------
@@ -59,7 +60,7 @@ show("""
 # MAGIC |---|---|
 # MAGIC | Bad `UPDATE`/`DELETE`/`MERGE`/load | `RESTORE TABLE t TO VERSION AS OF n` |
 # MAGIC | Need a few old rows back | `INSERT INTO t SELECT * FROM t VERSION AS OF n WHERE …` |
-# MAGIC | `DROP TABLE` on a **Unity Catalog** table | `UNDROP TABLE t` within the retention window (**7 days** by default); `SHOW TABLES DROPPED` lists candidates |
+# MAGIC | `DROP TABLE` on a **Unity Catalog** table | `UNDROP TABLE t` within the retention window (**7 days** by default, managed **and** external UC tables); `SHOW TABLES DROPPED` lists candidates — use `UNDROP TABLE WITH ID '<id>'` if several share a name |
 # MAGIC | `CREATE OR REPLACE` by mistake | Time travel/`RESTORE` to a version before the replace (history is kept) |
 
 # COMMAND ----------
@@ -80,10 +81,11 @@ show("""
   <li>Re-running it syncs only the changes (<b>incremental</b>)</li><li>Slower, doubles storage</li>
   <li>Use for: <b>backups</b>, disaster recovery, migrating tables</li></ul></div>
  <div class="card orange"><h3>🪶 SHALLOW CLONE</h3>
-  <code>CREATE OR REPLACE TABLE t_dev SHALLOW CLONE t</code>
+  <code>CREATE TABLE t_dev SHALLOW CLONE t</code>
   <ul><li>Copies <b>metadata only</b>; references the source's data files</li><li>Instant and nearly free</li>
   <li>New writes to the clone go to the clone's own files</li>
-  <li>⚠️ Breaks if the source files it points to are <b>VACUUMed</b></li>
+  <li>⚠️ Legacy Hive metastore: breaks if the source's files are <b>VACUUMed</b>. Unity Catalog tracks clone references, so a VACUUM of the source doesn't break it</li>
+  <li>UC: can't be re-created with <code>CREATE OR REPLACE</code> — drop it and clone again; no clone of a clone</li>
   <li>Use for: <b>dev/test</b> copies, trying risky changes</li></ul></div>
 </div>
 """ + callout("exam", "In both cases changes to the clone do <b>not</b> affect the source. You can clone a specific version: "
@@ -113,7 +115,7 @@ show("""
   <ul><li>Sorts data so similar values of the column(s) land in the <b>same files</b></li>
   <li>File statistics (min/max) then let queries <b>skip</b> most files → faster filters</li>
   <li>Best for <b>high-cardinality</b> columns used in filters/joins</li>
-  <li>⚠️ <b>Not incremental</b>: rewrites the data again each run</li></ul></div>
+  <li>⚠️ <b>Not idempotent</b> (unlike plain OPTIMIZE): re-running can rewrite large parts of the data again</li></ul></div>
 </div>
 """ + callout("tip", "For new tables Databricks recommends <b>liquid clustering</b> (<code>CLUSTER BY</code> / <code>CLUSTER BY AUTO</code>) "
               "instead of partitioning + Z-order: incremental and keys can be changed without rewriting. Deep dive in Section 12."))
@@ -124,19 +126,19 @@ show("""
 # MAGIC ## 5 · `VACUUM` — deleting old files for good
 # MAGIC
 # MAGIC ```sql
-# MAGIC VACUUM t;                      -- delete unreferenced files older than the retention (default 7 days)
+# MAGIC VACUUM t;                      -- delete files removed from the table more than 7 days ago (default retention)
 # MAGIC VACUUM t RETAIN 240 HOURS;     -- custom retention (10 days)
 # MAGIC VACUUM t DRY RUN;              -- list what would be deleted, delete nothing
 # MAGIC ```
 # MAGIC
 # MAGIC | Fact | Detail |
 # MAGIC |---|---|
-# MAGIC | What gets deleted | Data files **not referenced by the current version** and older than the retention threshold (plus uncommitted leftovers) |
+# MAGIC | What gets deleted | Data files **not referenced by the current version** that were **removed** (by a commit) longer ago than the retention threshold, plus uncommitted leftovers. The clock starts at the **removal**, not at the file's creation |
 # MAGIC | Default retention | **7 days** — table property `delta.deletedFileRetentionDuration` |
 # MAGIC | Safety check | `RETAIN` below the table's retention fails unless `spark.databricks.delta.retentionDurationCheck.enabled = false` (classic compute only, never in production) |
 # MAGIC | Effect on time travel | You **can't** time-travel to versions whose files were vacuumed |
 # MAGIC | Transaction log | **Not** removed by VACUUM — log entries expire separately after `delta.logRetentionDuration` (default **30 days**) |
-# MAGIC | Shallow clones | Vacuuming the source can break shallow clones that still reference its files |
+# MAGIC | Shallow clones | Hive metastore: vacuuming the source can break shallow clones. Unity Catalog: files still used by a shallow clone are kept |
 # MAGIC
 # MAGIC > 🎯 Retention = the **time-travel window**. Want 30 days of time travel? Set `delta.deletedFileRetentionDuration = 'interval 30 days'`
 # MAGIC > (and keep `delta.logRetentionDuration` ≥ that).
@@ -150,7 +152,7 @@ show("""
 # MAGIC |---|---|
 # MAGIC | **Predictive optimization** (Unity Catalog **managed** tables) | Databricks decides when to run `OPTIMIZE`, `VACUUM` and `ANALYZE` for you, based on usage |
 # MAGIC | **Optimized writes** | Writes fewer, larger files (shuffles data before writing) |
-# MAGIC | **Auto compaction** | After a write, compacts small files in the background of the same job |
+# MAGIC | **Auto compaction** | Right after a write succeeds, compacts small files on the same compute |
 # MAGIC | **Automatic liquid clustering** (`CLUSTER BY AUTO`) | Chooses clustering keys from your query patterns |
 # MAGIC
 # MAGIC This is one more reason to prefer **managed** tables: the platform maintains them.
@@ -160,8 +162,8 @@ show("""
 # MAGIC %md
 # MAGIC ## ✅ Key takeaways
 # MAGIC 1. **Time travel**: `VERSION AS OF n`, `@vN`, `TIMESTAMP AS OF '…'`; **RESTORE** adds a new commit; `UNDROP` recovers dropped UC tables (7 days).
-# MAGIC 2. **Deep clone** = full independent copy (backups); **shallow clone** = metadata-only (dev/test), breaks if source files are vacuumed.
-# MAGIC 3. **OPTIMIZE** compacts small files; **ZORDER BY** co-locates values for data skipping (not incremental). Prefer liquid clustering for new tables.
+# MAGIC 2. **Deep clone** = full independent copy (backups); **shallow clone** = metadata-only copy for dev/test that shares the source's files (breaks after a source VACUUM only in the legacy Hive metastore).
+# MAGIC 3. **OPTIMIZE** compacts small files (idempotent); **ZORDER BY** co-locates values for data skipping (not idempotent). Prefer incremental **liquid clustering** for new tables.
 # MAGIC 4. **VACUUM** deletes unreferenced files older than **7 days** by default; afterwards those versions can't be time-travelled. It does **not** delete the log.
 # MAGIC 5. **Predictive optimization** automates OPTIMIZE/VACUUM for UC managed tables.
 # MAGIC

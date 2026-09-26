@@ -12,7 +12,8 @@
 # MAGIC | 5 | Survive a disaster with `RESTORE` |
 # MAGIC | 6 | See **schema enforcement** block bad writes, and **schema evolution** allow good ones |
 # MAGIC | 7 | Protect data quality with `NOT NULL` and `CHECK` constraints |
-# MAGIC | 8 | ✅ Automatic checks |
+# MAGIC | 8 | Let Delta fill columns for you: **generated** and **identity** columns |
+# MAGIC | 9 | ✅ Automatic checks |
 # MAGIC
 # MAGIC > 🔁 **Re-running?** Part 1 drops and recreates the table, so version numbers always start at 0. Run the parts **in order**.
 
@@ -153,6 +154,19 @@ display(history("lab03_products").select("version", "operation", "operationMetri
 
 # COMMAND ----------
 
+# DBTITLE 1,✔️ Sanity check: are the versions what this lab expects?
+expected = {0: "CREATE TABLE", 1: "WRITE", 2: "UPDATE", 3: "DELETE", 4: "WRITE"}
+actual = {r["version"]: r["operation"] for r in spark.sql("DESCRIBE HISTORY lab03_products").collect()}
+if all(actual.get(v) == op for v, op in expected.items()):
+    print("✅ Versions 0-4 are exactly as expected - the version numbers used below will work.")
+else:
+    print("⚠️ The history differs from what the lab expects (a cell was re-run or skipped, or Databricks added a background commit):")
+    for v in sorted(actual):
+        print(f"   v{v}: {actual[v]}" + ("" if expected.get(v, actual[v]) == actual[v] else f"   (expected {expected[v]})"))
+    print("👉 Re-run the lab from Part 1 (it drops and recreates the table).")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC 💡 If the `DELETE` shows **`numDeletionVectorsAdded`** instead of rewritten files, **deletion vectors** are on: Delta just
 # MAGIC *marked* the rows as deleted instead of rewriting the Parquet files. Files are physically rewritten later by `OPTIMIZE`
@@ -194,6 +208,18 @@ display(spark.sql(f"""
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC The same in **Python** with DataFrame reader options:
+
+# COMMAND ----------
+
+# DBTITLE 1,Time travel from Python
+v1_df = spark.read.option("versionAsOf", 1).table("lab03_products")
+v2_df = spark.read.option("timestampAsOf", str(ts_v2)).table("lab03_products")
+print("rows in v1:", v1_df.count(), "| rows at the timestamp of v2:", v2_df.count())
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC **Diff two versions** — which rows changed between v1 and v2? (`EXCEPT` returns rows in the first query that aren't in the second.)
 
 # COMMAND ----------
@@ -229,15 +255,15 @@ print(f"The bad DELETE is version {bad_version} → last good version is {last_g
 # COMMAND ----------
 
 # DBTITLE 1,RESTORE → version 6
-# MAGIC %sql
-# MAGIC RESTORE TABLE lab03_products TO VERSION AS OF 4;
-# MAGIC
-# MAGIC SELECT count(*) AS products FROM lab03_products;
+# SQL equivalent (with the lab's expected numbers):  RESTORE TABLE lab03_products TO VERSION AS OF 4
+display(spark.sql(f"RESTORE TABLE lab03_products TO VERSION AS OF {last_good}"))
+print("Products after restore:", spark.table("lab03_products").count())
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC `RESTORE` doesn't erase history — it **adds a new commit** (version 6) that makes the table look like version 4 again.
+# MAGIC Its output reports how many files were restored/removed (`num_restored_files`, `num_removed_files`, …).
 # MAGIC The broken version 5 is still in the history (you could even time-travel to it).
 
 # COMMAND ----------
@@ -261,7 +287,7 @@ new_rows = spark.createDataFrame([Row(product_id="P103", title="Smart Scale", br
                                       category="Electronics", price=49.0, rating=4.6)])
 try:
     new_rows.write.mode("append").saveAsTable("lab03_products")
-    print("Appended (unexpected!)")
+    print("Appended (unexpected!) - automatic schema merging must be enabled on this compute")
 except Exception as e:
     print("🚫 Rejected by schema enforcement:\n   ", str(e).strip().splitlines()[0][:220])
 
@@ -272,7 +298,8 @@ bad_type = spark.createDataFrame([("P104", "Mystery Box", "FunLab", "Toys", "not
                                  "product_id STRING, title STRING, brand STRING, category STRING, price STRING")
 try:
     bad_type.write.mode("append").saveAsTable("lab03_products")
-    print("Appended (unexpected!)")
+    print("Appended (unexpected!) - cleaning it up so the lab stays consistent")
+    spark.sql("DELETE FROM lab03_products WHERE product_id = 'P104'")
 except Exception as e:
     print("🚫 Rejected - STRING can't be written into a DOUBLE column:\n   ", str(e).strip().splitlines()[0][:220])
 
@@ -284,7 +311,8 @@ except Exception as e:
 # COMMAND ----------
 
 # DBTITLE 1,✅ Append with mergeSchema → version 7
-new_rows.write.mode("append").option("mergeSchema", "true").saveAsTable("lab03_products")
+if spark.sql("SELECT count(*) FROM lab03_products WHERE product_id = 'P103'").first()[0] == 0:
+    new_rows.write.mode("append").option("mergeSchema", "true").saveAsTable("lab03_products")
 display(spark.sql("SELECT product_id, title, price, rating FROM lab03_products WHERE product_id IN ('P101', 'P103')"))
 
 # COMMAND ----------
@@ -339,7 +367,52 @@ for label, stmt in [
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Part 8 · ✅ Automatic checks
+# MAGIC ## Part 8 · Generated and identity columns
+# MAGIC A **price history** table where Delta fills two columns itself:
+# MAGIC * `log_id` — an **identity** column (unique, increasing surrogate key)
+# MAGIC * `change_date` — a **generated** column computed from `changed_at`
+# MAGIC
+# MAGIC Both must be declared in `CREATE TABLE` (they can't be added later or created with CTAS). When inserting, **leave them out** of the column list.
+
+# COMMAND ----------
+
+# DBTITLE 1,Create the table with generated & identity columns
+# MAGIC %sql
+# MAGIC DROP TABLE IF EXISTS lab03_price_log;
+# MAGIC
+# MAGIC CREATE TABLE lab03_price_log (
+# MAGIC   log_id      BIGINT GENERATED ALWAYS AS IDENTITY,
+# MAGIC   product_id  STRING NOT NULL,
+# MAGIC   price       DOUBLE,
+# MAGIC   changed_at  TIMESTAMP,
+# MAGIC   change_date DATE GENERATED ALWAYS AS (CAST(changed_at AS DATE))
+# MAGIC );
+# MAGIC
+# MAGIC INSERT INTO lab03_price_log (product_id, price, changed_at)
+# MAGIC SELECT product_id, price, current_timestamp() FROM lab03_products WHERE category = 'Electronics';
+# MAGIC
+# MAGIC SELECT * FROM lab03_price_log ORDER BY log_id;
+
+# COMMAND ----------
+
+# DBTITLE 1,❌ You can't write your own values into a GENERATED ALWAYS identity column
+try:
+    spark.sql("INSERT INTO lab03_price_log (log_id, product_id, price, changed_at) "
+              "VALUES (999, 'P001', 1.0, current_timestamp())")
+    print("Inserted (unexpected!)")
+except Exception as e:
+    print("🚫", str(e).strip().splitlines()[0][:200])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC > 🎯 Identity values are **unique and increasing but not necessarily consecutive**. `GENERATED BY DEFAULT AS IDENTITY`
+# MAGIC > would allow explicit values. A generated column's value must always equal its expression — Delta computes it on write.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Part 9 · ✅ Automatic checks
 
 # COMMAND ----------
 
@@ -350,10 +423,16 @@ _props = {r["key"]: r["value"] for r in spark.sql("SHOW TBLPROPERTIES lab03_prod
 _checks = {
     "Table is Delta": table_detail("lab03_products")["format"] == "delta",
     "History contains UPDATE, DELETE and RESTORE": {"UPDATE", "DELETE", "RESTORE"} <= set(_ops),
-    "Version 1 had 36 products": spark.sql("SELECT count(*) FROM lab03_products VERSION AS OF 1").first()[0] == 36,
+    "The initial load (first WRITE) had 36 products": spark.sql(
+        "SELECT count(*) FROM lab03_products VERSION AS OF "
+        + str(_h.where("operation = 'WRITE'").agg({"version": "min"}).first()[0])).first()[0] == 36,
     "Restored table has 33 products (32 + P103)": spark.table("lab03_products").count() == 33,
     "Column 'rating' added by schema evolution": "rating" in spark.table("lab03_products").columns,
     "CHECK constraint registered": any(k.startswith("delta.constraints.positive_price") for k in _props),
+    "Generated column filled (change_date = date of changed_at)": spark.sql(
+        "SELECT count(*) FROM lab03_price_log WHERE change_date = CAST(changed_at AS DATE)").first()[0] > 0,
+    "Identity column produced unique ids": spark.sql(
+        "SELECT count(DISTINCT log_id) = count(*) FROM lab03_price_log").first()[0],
 }
 for name, ok in _checks.items():
     print(("✅ " if ok else "❌ ") + name)

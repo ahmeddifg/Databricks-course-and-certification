@@ -126,7 +126,7 @@ _QUIZ_TEMPLATE = r"""
 """
 
 
-def render_quiz(questions, title="Quiz", meta="", pass_mark=0.7):
+def render_quiz(questions, title="Quiz", meta="", pass_mark=0.8):
     """Render an interactive quiz. Unanswered questions count as wrong in the result."""
     for n, q in enumerate(questions, 1):  # fail fast on typos in the question bank
         assert {"q", "options", "answer"} <= set(q), f"Q{n} is missing q/options/answer"

@@ -90,6 +90,51 @@ deletion_vector_7c1e….bin          ← marks deleted rows
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### 🧪 Replay a transaction log yourself
+# MAGIC Unity Catalog protects the storage of managed tables, so you can't open `_delta_log/` in a workspace. Instead, this cell
+# MAGIC **simulates** exactly what a Delta reader does: replay `add`/`remove` actions version by version to find the **active files**.
+# MAGIC Then it shows what `VACUUM` would delete and which versions would lose time travel. Edit the log and re-run to experiment!
+
+# COMMAND ----------
+
+# DBTITLE 1,Transaction log simulator (pure Python - no Spark needed)
+toy_log = [  # version -> (operation, files added, files removed)
+    (0, "CREATE TABLE",        [],                        []),
+    (1, "WRITE (load)",        ["part-A", "part-B"],      []),
+    (2, "UPDATE Electronics",  ["part-C"],                ["part-A"]),
+    (3, "DELETE Toys",         ["part-D"],                ["part-B"]),
+    (4, "OPTIMIZE",            ["part-E"],                ["part-C", "part-D"]),
+]
+
+snapshots, active = {}, set()
+for version, op, added, removed in toy_log:            # the reader's replay loop
+    active = (active - set(removed)) | set(added)
+    snapshots[version] = sorted(active)
+
+current_files = set(snapshots[max(snapshots)])
+ever_written = {f for _, _, added, _ in toy_log for f in added}
+vacuumed = ever_written - current_files                  # VACUUM (once the retention period has passed)
+
+rows = ""
+for version, op, added, removed in toy_log:
+    ok = not (set(snapshots[version]) & vacuumed)
+    actions = " ".join('<span class="pill">+' + f + "</span>" for f in added)
+    actions += " ".join('<span class="pill red">-' + f + "</span>" for f in removed)
+    files = ", ".join(snapshots[version]) or "(none)"
+    status = "✅" if ok else "❌ files gone"
+    rows += f"<tr><td><b>v{version}</b></td><td>{op}</td><td>{actions}</td><td>{files}</td><td>{status}</td></tr>"
+show(f"""
+<div class="kicker">Simulation · replaying _delta_log</div>
+<h2>Active files per version — and the effect of VACUUM</h2>
+<table class="tbl"><tr><th>Version</th><th>Operation</th><th>Actions in the commit</th><th>Active files (the table at this version)</th>
+<th>Time travel after VACUUM</th></tr>{rows}</table>
+<p>Files deleted by VACUUM: <b>{', '.join(sorted(vacuumed))}</b> · files kept: <b>{', '.join(sorted(current_files))}</b></p>
+""" + callout("exam", "Only the <b>current</b> version is guaranteed to survive VACUUM. Older versions become unreadable once "
+              "their files are removed — even though their commits are still in the log."))
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 3 · How reads and writes work
 
 # COMMAND ----------
