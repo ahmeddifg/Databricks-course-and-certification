@@ -53,7 +53,8 @@ def widget_value(name):
 
 # DBTITLE 1,Task 2
 # TODO
-total_customers = None
+df_customers=spark.read.json(f"{dataset_path}/customers-json")
+total_customers = df_customers.count()
 
 # COMMAND ----------
 
@@ -72,6 +73,8 @@ check("total_customers is 300", total_customers == 300)
 
 # DBTITLE 1,Task 3.1 + 3.2
 # TODO: read the CSV files and save them as table lab01_products
+products_df = spark.read.csv(f"{dataset_path}/products-csv", header=True, inferSchema=True, sep=";")
+products_df.write.mode("overwrite").saveAsTable("lab01_products") 
 
 # COMMAND ----------
 
