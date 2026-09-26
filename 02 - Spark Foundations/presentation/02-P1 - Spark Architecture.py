@@ -104,7 +104,7 @@ show("""
 # MAGIC | Where partitions come from | Default / setting |
 # MAGIC |---|---|
 # MAGIC | Reading files | Split into ~**128 MB** chunks (`spark.sql.files.maxPartitionBytes`) |
-# MAGIC | After a shuffle (`groupBy`, `join`, `orderBy`, `distinct`…) | `spark.sql.shuffle.partitions` (**200** by default) — **AQE** coalesces small ones automatically |
+# MAGIC | After a shuffle (`groupBy`, `join`, `orderBy`, `distinct`…) | `spark.sql.shuffle.partitions` — **200** in Apache Spark / classic compute, **`auto`** on serverless (auto-optimized shuffle picks the number). **AQE** coalesces small ones automatically |
 # MAGIC | You explicitly | `df.repartition(n)` (full shuffle) or `df.coalesce(n)` (merge, no full shuffle) |
 
 # COMMAND ----------
@@ -145,7 +145,7 @@ show("""
 # MAGIC ## ✅ Key takeaways
 # MAGIC 1. **Driver** plans & schedules; **executors** do the work in parallel on **partitions**; the **cluster manager** allocates resources.
 # MAGIC 2. **Action → job → stages (split at shuffles) → tasks (one per partition).**
-# MAGIC 3. **Cores = task slots**; partitions decide parallelism. Shuffle partitions default to 200; AQE coalesces them.
+# MAGIC 3. **Cores = task slots**; partitions decide parallelism. Shuffle partitions default to 200 (`auto` on serverless); AQE coalesces them.
 # MAGIC 4. Serverless & Standard mode use **Spark Connect**: DataFrame/SQL API only, no `sparkContext`/RDDs, no Spark UI on serverless.
 # MAGIC 5. Keep big data **off the driver**.
 # MAGIC

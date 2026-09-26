@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 📝 02-Q · Exam Questions — Spark Foundations
-# MAGIC **27 exam-style questions** on Spark architecture (02-P1), execution & plans (02-P2) and DataFrames/Spark SQL (02-P3).
+# MAGIC **33 exam-style questions** on Spark architecture (02-P1), execution & plans (02-P2) and DataFrames/Spark SQL (02-P3).
 # MAGIC These concepts appear inside **D3 Transformation** and **D6 Troubleshooting & Optimization** questions.
 # MAGIC
 # MAGIC * Click **Check answer** for feedback; **📊 Show my result** for your per-topic score. Target **≥ 80 %**.
@@ -121,7 +121,7 @@ questions = [
      "q": "What is the default value of `spark.sql.shuffle.partitions` in Apache Spark?",
      "options": ["8", "64", "200", "Equal to the number of cores"],
      "answer": 2,
-     "explanation": "200. On Databricks, AQE coalesces small shuffle partitions automatically, and serverless tunes shuffles for you."},
+     "explanation": "200 in Apache Spark (and classic compute). On Databricks serverless the default is `auto` (auto-optimized shuffle), and AQE coalesces small shuffle partitions automatically."},
     {"topic": "Execution & plans",
      "q": "In the Spark UI, one task of a stage runs for 25 minutes while the other 199 finish in 30 seconds. What is the most likely cause?",
      "options": ["Too many executors", "Data skew — one partition holds far more rows than the others",
@@ -174,10 +174,46 @@ questions = [
                  "It writes the DataFrame to a Delta table", "It is required before every join"],
      "answer": 1,
      "explanation": "cache()/persist() mark the DataFrame; the first action materializes it. Use it only for reused results and unpersist() afterwards. Serverless doesn't support the cache APIs."},
+
+    # ---------------- Troubleshooting & tuning ----------------
+    {"topic": "Troubleshooting & tuning",
+     "q": "The Spark UI shows **Spill (disk): 45 GB** for the shuffle stage of a large aggregation. What does it indicate and what helps?",
+     "options": ["The driver is too small — increase driver memory", "Partitions are too large for executor memory — use more/smaller shuffle partitions (or fix skew)",
+                 "The table needs VACUUM", "Photon is disabled — enable it"],
+     "answer": 1,
+     "explanation": "Spill means data didn't fit in execution memory and was written to disk. Smaller partitions (more shuffle partitions), fixing skew, filtering earlier or memory-optimized workers reduce it."},
+    {"topic": "Troubleshooting & tuning",
+     "q": "Reading a folder of large Parquet files produces only a few very big input partitions, leaving most cores idle. Which setting increases read parallelism?",
+     "options": ["`spark.sql.shuffle.partitions`", "`spark.sql.files.maxPartitionBytes` (lower it)", "`spark.sql.autoBroadcastJoinThreshold`", "`spark.sql.ansi.enabled`"],
+     "answer": 1,
+     "explanation": "maxPartitionBytes (128 MB default) caps how many bytes go into one read partition; lowering it creates more, smaller input partitions. shuffle.partitions only affects partitions after a shuffle."},
+    {"topic": "Troubleshooting & tuning",
+     "q": "A job forces `broadcast()` on a 12 GB dimension table and fails. What is the most likely reason?",
+     "options": ["Broadcast joins require Photon", "The table is too large to broadcast: it must be collected by the driver and copied to every executor (and broadcasts are capped at 8 GB)",
+                 "broadcast() only works in SQL", "The join key has nulls"],
+     "answer": 1,
+     "explanation": "Broadcasting ships the whole table to every executor (built via the driver). Large broadcasts cause out-of-memory errors or exceed the 8 GB limit — use a shuffle join instead."},
+    {"topic": "Troubleshooting & tuning",
+     "q": "How do you **disable automatic broadcast joins** at planning time on classic compute?",
+     "options": ["`spark.conf.set(\"spark.sql.autoBroadcastJoinThreshold\", -1)`", "`spark.conf.set(\"spark.sql.shuffle.partitions\", 0)`",
+                 "`spark.conf.set(\"spark.sql.adaptive.enabled\", true)`", "Use `coalesce(1)` on the small table"],
+     "answer": 0,
+     "explanation": "Setting the threshold to -1 disables size-based automatic broadcasts (explicit hints still apply). On serverless this setting is managed for you."},
+    {"topic": "Troubleshooting & tuning",
+     "q": "Which `explain` call shows the parsed, analyzed, optimized logical **and** physical plans?",
+     "options": ["`df.explain()`", "`df.explain(\"extended\")` (SQL: `EXPLAIN EXTENDED`)", "`df.explain(\"cost\")`", "`df.show(explain=True)`"],
+     "answer": 1,
+     "explanation": "explain() / EXPLAIN shows only the physical plan; extended adds the logical plans; formatted gives an operator overview plus details; cost adds statistics."},
+    {"topic": "Troubleshooting & tuning",
+     "q": "On serverless compute, `spark.conf.get(\"spark.sql.shuffle.partitions\")` returns `auto`. What does that mean?",
+     "options": ["Shuffles are disabled", "Auto-optimized shuffle: Databricks picks the number of shuffle partitions per query from the plan and data size",
+                 "The value is always 200", "Each query uses one partition per core"],
+     "answer": 1,
+     "explanation": "`auto` enables auto-optimized shuffle. You can still set an explicit number (it's one of the few settings allowed on serverless)."},
 ]
 
-render_quiz(questions, title="Section 02 · Spark Foundations",
-            meta="27 questions · architecture, execution plans, DataFrames & Spark SQL · target ≥ 80 %")
+render_quiz(questions, title="Section 02 · Spark Foundations", pass_mark=0.8,
+            meta="33 questions · architecture, execution plans, DataFrames & Spark SQL · target ≥ 80 %")
 
 # COMMAND ----------
 
@@ -188,6 +224,7 @@ render_quiz(questions, title="Section 02 · Spark Foundations",
 # MAGIC | Architecture | `presentation/02-P1 - Spark Architecture` |
 # MAGIC | Execution & plans | `presentation/02-P2 - How Spark Executes Your Code` + `labs/02-L1` |
 # MAGIC | DataFrames & SQL | `presentation/02-P3 - DataFrames and Spark SQL Essentials` + `labs/02-L2` |
+# MAGIC | Troubleshooting & tuning | `presentation/02-P2` §§ 6–8 + `labs/02-L2` Parts 3–5 |
 
 # COMMAND ----------
 

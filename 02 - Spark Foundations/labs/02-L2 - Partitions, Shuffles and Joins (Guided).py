@@ -108,8 +108,9 @@ display(by_country.groupBy(F.spark_partition_id().alias("partition"))
 
 # MAGIC %md
 # MAGIC ## Part 3 · Shuffle partitions
-# MAGIC After a shuffle (groupBy, join…) the number of partitions comes from **`spark.sql.shuffle.partitions`** (default **200**) —
-# MAGIC and **AQE** then **coalesces** small partitions automatically. This is one of the few Spark settings you may change on serverless.
+# MAGIC After a shuffle (groupBy, join…) the number of partitions comes from **`spark.sql.shuffle.partitions`** — **200** in Apache Spark
+# MAGIC and on classic compute, **`auto`** on serverless (auto-optimized shuffle chooses the number for each query). **AQE** then **coalesces**
+# MAGIC small partitions automatically. This is one of the few Spark settings you may change on serverless.
 
 # COMMAND ----------
 
@@ -154,7 +155,8 @@ from pyspark.sql.functions import broadcast
 
 bcast_join = orders.join(broadcast(customers), "customer_id")
 bcast_plan = plan_text(bcast_join)
-print("Strategy:", join_strategy(bcast_plan), "| big side shuffled?", has_shuffle(bcast_plan))
+print("Strategy:", join_strategy(bcast_plan))
+print("Exchange lines in the plan:", [l.strip() for l in bcast_plan.splitlines() if "Exchange" in l])
 
 # COMMAND ----------
 
@@ -167,6 +169,9 @@ print(shuffle_plan)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC > ℹ️ On **Photon** (serverless) the shuffle join shows up as **`PhotonShuffledHashJoin`** — Photon replaces sort-merge joins with
+# MAGIC > hash joins. On classic compute without Photon you'll see **`SortMergeJoin`**. Either way, both sides are shuffled.
+# MAGIC
 # MAGIC The same hints in SQL:
 
 # COMMAND ----------
@@ -183,7 +188,7 @@ print(shuffle_plan)
 # MAGIC %md
 # MAGIC | | Broadcast hash join | Shuffle (sort-merge / shuffled hash) join |
 # MAGIC |---|---|---|
-# MAGIC | Plan shows | `BroadcastExchange` + `BroadcastHashJoin` | `Exchange hashpartitioning` on **both** sides + `SortMergeJoin` / `ShuffledHashJoin` |
+# MAGIC | Plan shows | `BroadcastExchange` + `BroadcastHashJoin` | `Exchange hashpartitioning` on **both** sides + `SortMergeJoin` / `ShuffledHashJoin` (Photon: `PhotonShuffledHashJoin`) |
 # MAGIC | Best when | one side small | both sides large |
 # MAGIC | Hint | `broadcast(df)` · `/*+ BROADCAST(t) */` | `df.hint("merge")` · `/*+ MERGE(t) */` · `/*+ SHUFFLE_HASH(t) */` |
 # MAGIC
@@ -196,33 +201,52 @@ print(shuffle_plan)
 # MAGIC ## Part 5 · Data skew — see it, then fix it with salting
 # MAGIC
 # MAGIC We create a dataset where **90 %** of rows have the same key (`key = 0`) — like one mega-customer or a default value.
+# MAGIC (Deterministic, so everyone gets the same numbers.)
 
 # COMMAND ----------
 
 # DBTITLE 1,Create skewed data
-skewed = (spark.range(2_000_000)
-          .withColumn("key", F.when(F.rand(seed=7) < 0.9, F.lit(0)).otherwise((F.col("id") % 50) + 1))
+skewed = (spark.range(2_000_000, numPartitions=8)
+          .withColumn("key", F.when(F.col("id") % 10 < 9, F.lit(0)).otherwise((F.col("id") % 50) + 1))
           .withColumn("amount", F.lit(1)))
 
-skewed_by_key = skewed.repartition(8, "key")          # hash partitioning by key -> hot key lands in ONE partition
+
+def skew_report(df, label):
+    sizes = [r["rows"] for r in partition_sizes(df).collect()]
+    print(f"{label:<22} largest partition {max(sizes):>9,} rows | smallest {min(sizes):>7,} | "
+          f"largest/average = {max(sizes) / (sum(sizes) / len(sizes)):.1f}x")
+    return max(sizes)
+
+
+skewed_by_key = skewed.repartition(8, "key")          # hash partitioning by key -> the hot key lands in ONE partition
 display(partition_sizes(skewed_by_key))
+max_unsalted = skew_report(skewed_by_key, "by key (unsalted)")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC One partition holds ~1.8 million rows while the others hold a few thousand: in a real job, the task for that partition is the
-# MAGIC **straggler** that keeps the whole stage waiting (you'd see it in the Spark UI as one long task, often with spill).
+# MAGIC One partition holds **~1.84 million** rows (key 0 plus a few small keys) while the others hold only **~40 thousand**: in a real
+# MAGIC job, the task for that partition is the **straggler** that keeps the whole stage waiting (you'd see it in the Spark UI as one long
+# MAGIC task, often with spill).
 # MAGIC
-# MAGIC **Salting:** add a random "salt" to the key so the hot key is spread over many partitions, aggregate per (key, salt),
-# MAGIC then aggregate again per key.
+# MAGIC **Salting:** add a "salt" column (here `0…31`) so the hot key is split into many (key, salt) groups that can land in different
+# MAGIC partitions; aggregate per (key, salt), then aggregate again per key.
 
 # COMMAND ----------
 
-# DBTITLE 1,Salted repartition is balanced
-SALT_BUCKETS = 8
-salted = skewed.withColumn("salt", (F.rand(seed=11) * SALT_BUCKETS).cast("int"))
+# DBTITLE 1,Salting spreads the hot key
+SALT_BUCKETS = 32
+salted = skewed.withColumn("salt", (F.col("id") % SALT_BUCKETS).cast("int"))
 salted_by_key = salted.repartition(8, "key", "salt")
 display(partition_sizes(salted_by_key))
+max_salted = skew_report(salted_by_key, "by key + salt")
+print(f"👉 The largest partition shrank {max_unsalted / max_salted:.1f}x")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Much better — but hash partitioning never gives a *perfect* split (several (key, salt) groups can hash to the same partition).
+# MAGIC More salt buckets → smoother distribution, at the cost of a second aggregation step.
 
 # COMMAND ----------
 
@@ -275,6 +299,7 @@ _checks = {
     "broadcast() produced a broadcast join": join_strategy(bcast_plan) == "broadcast",
     "merge hint produced a shuffle join": join_strategy(shuffle_plan) == "shuffle",
     "salting preserved the aggregation result": same,
+    "salting shrank the largest partition at least 3x": max_unsalted >= 3 * max_salted,
     "shuffle partitions reset": spark.conf.get("spark.sql.shuffle.partitions") == original_shuffle_partitions,
 }
 for name, ok in _checks.items():

@@ -138,6 +138,8 @@ revenue_df.explain()
 # MAGIC We ask for just two columns of big orders. Look at the **scan** node at the bottom of the plan:
 # MAGIC * only `order_id` and `total` are read (**column pruning** — see `ReadSchema` / the output columns),
 # MAGIC * the filter on `total` is handed to the scan (**pushed filters / data filters**) so files and row groups that can't match are skipped.
+# MAGIC
+# MAGIC *(On serverless the scan is a Photon operator and the labels can differ — e.g. `PhotonScan … RequiredDataFilters` — but the idea is the same.)*
 
 # COMMAND ----------
 
