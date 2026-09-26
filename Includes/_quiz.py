@@ -21,6 +21,7 @@ import json as _json
 import uuid as _uuid
 
 _QUIZ_TEMPLATE = r"""
+<meta charset="utf-8">
 <style>
 .qz{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#fff;
   color:#1d2433;padding:16px 18px;border-radius:14px;border:1px solid #e3e8ef;max-width:1000px}

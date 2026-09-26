@@ -9,6 +9,7 @@
 
 # DBTITLE 1,Theme + show()
 COURSE_CSS = """
+<meta charset="utf-8">
 <style>
 .sw{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     background:#ffffff;color:#1d2433;padding:18px 20px;border-radius:14px;line-height:1.45;
