@@ -64,7 +64,7 @@ _QUIZ_TEMPLATE = r"""
   const PASS = __PASS__;
   const root = document.getElementById("__ID__");
   const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-  const md = s => esc(s).replace(/`([^`]+)`/g,"<code>$1</code>").replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/\n/g,"<br>");
+  const md = s => esc(s).replace(/``\s?([\s\S]+?)\s?``/g,(m,c)=>"<code>"+c.replace(/`/g,"&#96;")+"</code>").replace(/`([^`]+)`/g,"<code>$1</code>").replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/\n/g,"<br>");
   const state = QS.map(()=>({done:false, ok:false}));
   const box = root.querySelector(".qs");
   QS.forEach((q,i)=>{
