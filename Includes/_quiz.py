@@ -6,6 +6,9 @@
 # MAGIC `render_quiz(questions, title)` draws a clickable exam-style quiz (instant feedback, explanations,
 # MAGIC score and per-topic breakdown) with `displayHTML`. No Spark job is started.
 # MAGIC
+# MAGIC `render_quiz(questions, title, mode="exam", minutes=90)` is the **exam simulation**: no feedback until you click
+# MAGIC **Submit exam** (or the countdown reaches 0), then every answer, explanation and the per-topic score are shown.
+# MAGIC
 # MAGIC Question format:
 # MAGIC ```python
 # MAGIC {"topic": "Compute", "q": "Question text with `code` and **bold**",
@@ -48,11 +51,13 @@ _QUIZ_TEMPLATE = r"""
 .qz .result{display:none;margin-top:14px;padding:12px 14px;border-radius:10px;background:#0b2a4a;color:#fff}
 .qz .result table{border-collapse:collapse;margin-top:6px;font-size:13px}
 .qz .result td{padding:3px 10px;border-bottom:1px solid #2b4b6f}
+.qz .timer{font-weight:700;font-variant-numeric:tabular-nums}.qz .timer.low{color:#ffb4b4}
+.qz input:disabled + b{opacity:.8}
 </style>
 <div class="qz" id="__ID__">
   <h2>__TITLE__</h2>
   <div class="meta">__META__</div>
-  <div class="bar"><span class="score">Answered 0 / 0 · Correct 0</span>
+  <div class="bar"><span class="timer"></span><span class="score">Answered 0 / 0 · Correct 0</span>
     <button class="finish">📊 Show my result</button><button class="reveal">👀 Reveal all answers</button>
     <button class="reset">↺ Reset</button></div>
   <div class="qs"></div>
@@ -62,6 +67,10 @@ _QUIZ_TEMPLATE = r"""
 (function(){
   const QS = __DATA__;
   const PASS = __PASS__;
+  const MODE = "__MODE__";
+  const MINUTES = __MINUTES__;
+  const EXAM = MODE === "exam";
+  let submitted = false, timer = null, left = MINUTES * 60, armed = false;
   const root = document.getElementById("__ID__");
   const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const md = s => esc(s).replace(/``\s?([\s\S]+?)\s?``/g,(m,c)=>"<code>"+c.replace(/`/g,"&#96;")+"</code>").replace(/`([^`]+)`/g,"<code>$1</code>").replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/\n/g,"<br>");
@@ -99,35 +108,79 @@ _QUIZ_TEMPLATE = r"""
     score();
   }
   function alert_(m){ const b=root.querySelector(".score"); const old=b.textContent; b.textContent="⚠️ "+m; setTimeout(score,1200); }
+  function answeredCount(){ return [...root.querySelectorAll(".q")].filter(d=>d.querySelector("input:checked")).length; }
   function score(){
     const done=state.filter(s=>s.done).length, ok=state.filter(s=>s.ok).length;
-    root.querySelector(".score").textContent=`Answered ${done} / ${QS.length} · Correct ${ok}`;
+    root.querySelector(".score").textContent = (EXAM && !submitted)
+      ? `Answered ${answeredCount()} / ${QS.length}`
+      : `Answered ${EXAM ? answeredCount() : done} / ${QS.length} · Correct ${ok}`;
+  }
+  function tick(){
+    const t=root.querySelector(".timer"); if(!EXAM||!MINUTES){ t.style.display="none"; return; }
+    const m=Math.floor(Math.max(left,0)/60), s=Math.max(left,0)%60;
+    t.textContent=`⏱️ ${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`; t.classList.toggle("low", left<=300);
+  }
+  function startTimer(){
+    if(!EXAM||!MINUTES) { tick(); return; }
+    clearInterval(timer); left=MINUTES*60; tick();
+    timer=setInterval(()=>{ left--; tick(); if(left<=0){ clearInterval(timer); submitExam(true); } },1000);
+  }
+  function submitExam(timeUp){
+    if(submitted) return; submitted=true; clearInterval(timer);
+    root.querySelectorAll(".q").forEach((d,i)=>grade(i,d,true));
+    root.querySelectorAll("input").forEach(x=>x.disabled=true);
+    root.querySelector(".finish").textContent="📊 Show my result";
+    showResult(timeUp);
   }
   root.querySelector(".reveal").onclick=()=>root.querySelectorAll(".q").forEach((d,i)=>grade(i,d,true));
+  root.querySelectorAll("input").forEach(x=>x.addEventListener("change", score));
   root.querySelector(".reset").onclick=()=>{
-    root.querySelectorAll("input").forEach(x=>x.checked=false);
+    submitted=false; armed=false;
+    if(EXAM) root.querySelector(".finish").textContent="📤 Submit exam";
+    root.querySelectorAll("input").forEach(x=>{x.checked=false; x.disabled=false;});
     root.querySelectorAll("label").forEach(l=>l.classList.remove("correct","wrong"));
     root.querySelectorAll(".q").forEach(d=>d.classList.remove("ok","ko"));
     root.querySelectorAll(".exp").forEach(e=>e.style.display="none");
     state.forEach((s,i)=>state[i]={done:false,ok:false}); root.querySelector(".result").style.display="none"; score();
+    startTimer();
   };
   root.querySelector(".finish").onclick=()=>{
+    if(EXAM && !submitted){
+      if(!armed){ armed=true; root.querySelector(".finish").textContent="⚠️ Click again to submit";
+                  setTimeout(()=>{ if(!submitted){ armed=false; root.querySelector(".finish").textContent="📤 Submit exam"; } },3000); return; }
+      submitExam(false); return;
+    }
+    showResult(false);
+  };
+  function showResult(timeUp){
     const topics={}; QS.forEach((q,i)=>{const t=q.topic||"General"; topics[t]=topics[t]||[0,0]; topics[t][1]++; if(state[i].ok) topics[t][0]++;});
     const ok=state.filter(s=>s.ok).length, pct=Math.round(100*ok/QS.length);
     let rows=Object.entries(topics).map(([t,[a,b]])=>`<tr><td>${esc(t)}</td><td>${a} / ${b}</td><td>${Math.round(100*a/b)}%</td></tr>`).join("");
     const r=root.querySelector(".result"); r.style.display="block";
-    r.innerHTML=`<b>Score: ${ok} / ${QS.length} (${pct}%)</b> — ${pct>=PASS*100?"🎉 Exam-ready on this topic!":"📚 Review the topics below and retry."}`+
+    const unanswered = QS.length - (EXAM ? answeredCount() : state.filter(s=>s.done).length);
+    r.innerHTML=(timeUp?"<b>⏰ Time is up — your answers were submitted.</b><br>":"")+
+      `<b>Score: ${ok} / ${QS.length} (${pct}%)</b> — ${pct>=PASS*100?"🎉 Pass level reached!":"📚 Review the topics below and retry."}`+
+      (unanswered?` <span style="opacity:.8">(${unanswered} unanswered = wrong)</span>`:"")+
       `<table><tr><td><b>Topic</b></td><td><b>Correct</b></td><td></td></tr>${rows}</table>`;
     r.scrollIntoView({behavior:"smooth"});
-  };
+  }
+  if(EXAM){
+    root.querySelectorAll(".check").forEach(b=>b.style.display="none");
+    root.querySelector(".reveal").style.display="none";
+    root.querySelector(".finish").textContent="📤 Submit exam";
+  }
+  startTimer();
   score();
 })();
 </script>
 """
 
 
-def render_quiz(questions, title="Quiz", meta="", pass_mark=0.8):
-    """Render an interactive quiz. Unanswered questions count as wrong in the result."""
+def render_quiz(questions, title="Quiz", meta="", pass_mark=0.8, mode="practice", minutes=None):
+    """Render an interactive quiz. Unanswered questions count as wrong in the result.
+    mode="practice": instant feedback per question.  mode="exam": answers hidden until "Submit exam";
+    minutes=N adds a countdown that submits automatically."""
+    assert mode in ("practice", "exam"), "mode must be 'practice' or 'exam'"
     for n, q in enumerate(questions, 1):  # fail fast on typos in the question bank
         assert {"q", "options", "answer"} <= set(q), f"Q{n} is missing q/options/answer"
         answers = q["answer"] if isinstance(q["answer"], list) else [q["answer"]]
@@ -135,6 +188,8 @@ def render_quiz(questions, title="Quiz", meta="", pass_mark=0.8):
     data = _json.dumps(questions, ensure_ascii=False).replace("</", "<\\/")
     html = (_QUIZ_TEMPLATE.replace("__DATA__", data)
             .replace("__PASS__", str(pass_mark))
+            .replace("__MODE__", mode)
+            .replace("__MINUTES__", str(int(minutes or 0)))
             .replace("__ID__", "qz" + _uuid.uuid4().hex[:8])
             .replace("__TITLE__", title)
             .replace("__META__", meta or f"{len(questions)} questions · pass mark {int(pass_mark * 100)}%"))
