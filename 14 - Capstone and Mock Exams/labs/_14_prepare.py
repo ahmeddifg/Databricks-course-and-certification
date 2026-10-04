@@ -379,6 +379,8 @@ def require_foundation(verbose: bool = True):
             raise RuntimeError(
                 f"Could not create catalog '{CAT}': {_first_line(e)}\n"
                 "On a paid workspace you need CREATE CATALOG on the metastore (and maybe a MANAGED LOCATION). "
+                "If the error mentions Default Storage (e.g. Free Edition): create the catalog in the UI - Catalog > + > "
+                "Create a catalog > Default Storage - then re-run. "
                 "Alternative: set CAPSTONE_CATALOG = '<a catalog you own>' in a cell BEFORE the %run cell.") from e
     for s in SCHEMAS14:
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CAT}`.`{s}`")

@@ -81,6 +81,11 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC > ⚠️ **Error `Metastore storage root URL does not exist … Default Storage is enabled`?** Some workspaces (notably
+# MAGIC > **Free Edition**) only let you create a catalog on *Default Storage* from the UI. Do it there: **Catalog** → **+** →
+# MAGIC > **Create a catalog** → name `skillwave`, storage **Default Storage** → **Create**, click the ⟳ refresh icon in Catalog
+# MAGIC > Explorer, then re-run cell 1.1 (`IF NOT EXISTS` → it simply passes) and carry on.
+# MAGIC >
 # MAGIC > 💡 **Where are its files?** Without `MANAGED LOCATION`, managed tables of this catalog are stored in the **metastore's
 # MAGIC > default storage** (Free Edition: Databricks-managed default storage). On paid workspaces an admin often requires
 # MAGIC > `CREATE CATALOG x MANAGED LOCATION 's3://…/abfss://…'` so each catalog's data lives in its own bucket/container.

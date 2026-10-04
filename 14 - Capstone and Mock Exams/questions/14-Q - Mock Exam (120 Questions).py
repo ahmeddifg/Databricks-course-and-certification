@@ -314,7 +314,7 @@ questions = [
                  "`SELECT * FROM t QUALIFY row_number() OVER (PARTITION BY customer_id ORDER BY updated_at DESC) = 1`",
                  "`SELECT * FROM t ORDER BY updated_at DESC LIMIT 1`"],
      "answer": 2,
-     "explanation": "row_number per customer ordered by updated_at DESC, keeping 1, returns the full latest row for every customer. Option C lacks GROUP BY and other columns; D returns one row overall."},
+     "explanation": "row_number per customer ordered by updated_at DESC, keeping 1, returns the full latest row for every customer. Option A has no GROUP BY (and loses the other columns); B returns every customer/timestamp pair; D returns one row overall."},
     {"topic": "D3 Transformation",
      "q": "`df_a` has columns (id, name, city) and `df_b` has the same columns in the order (id, city, name). What does `df_a.union(df_b)` do?",
      "options": ["Matches columns by name automatically",

@@ -165,6 +165,11 @@ print("silver.enrollments:", count("silver.enrollments"), "rows")
 # MAGIC
 # MAGIC Next a **materialized view**. On serverless it is created and refreshed by a small managed **pipeline** behind the
 # MAGIC scenes, so this cell can take a minute.
+# MAGIC
+# MAGIC > ⚠️ Creating a materialized view **from a notebook** on serverless compute is still a *Beta* feature. If 2.3 fails with a
+# MAGIC > "not supported" / preview error: open the **SQL editor**, select the **Serverless Starter Warehouse** and the catalog
+# MAGIC > `skillwave`, run the same `CREATE OR REPLACE MATERIALIZED VIEW gold.mv_daily_category_revenue …` statement there, then
+# MAGIC > come back and continue with 2.4 (or ask a workspace admin to enable the preview).
 
 # COMMAND ----------
 
@@ -399,7 +404,7 @@ for k in ("spark.sql.shuffle.partitions", "spark.sql.autoBroadcastJoinThreshold"
 # MAGIC RETURNS BOOLEAN
 # MAGIC COMMENT 'Admins see all rows; others only the countries mapped to them in silver.region_access'
 # MAGIC RETURN is_account_group_member('skillwave_admins')
-# MAGIC     OR EXISTS (SELECT 1 FROM silver.region_access a
+# MAGIC     OR EXISTS (SELECT 1 FROM skillwave.silver.region_access a
 # MAGIC                WHERE a.user_email = current_user() AND a.country = p_country);
 # MAGIC
 # MAGIC ALTER TABLE gold.fact_enrollments SET ROW FILTER gold.rf_student_country ON (student_country);

@@ -529,9 +529,10 @@ print("silver.enrollments:", spark.table(fq("silver.enrollments")).count(),
 # COMMAND ----------
 
 # DBTITLE 1,6.3 Time travel: compare the current version with the one before the DELETE
-_hist = spark.sql(f"DESCRIBE HISTORY {fq('silver.enrollments')}").orderBy(F.desc("version")).collect()
-_delete_version = _hist[0]["version"]
-_before = _delete_version - 1
+_hist = spark.sql(f"DESCRIBE HISTORY {fq('silver.enrollments')}").select("version", "operation").collect()
+_delete_version = max(r["version"] for r in _hist if r["operation"] == "DELETE")      # the accident
+_before = max(r["version"] for r in _hist                                           # last version before it
+              if r["version"] < _delete_version and r["operation"] != "DELETE")    # (safe if 6.1 ran twice)
 print("now                    :", spark.table(fq("silver.enrollments")).count())
 print(f"VERSION AS OF {_before:<9}:",
       spark.sql(f"SELECT count(*) FROM {fq('silver.enrollments')} VERSION AS OF {_before}").first()[0])
